@@ -1,0 +1,197 @@
+// raven-sqlite: a small, friendly SQLite binding for Raven.
+//
+//     import "github.com/martian56/raven-sqlite" { Db }
+//
+//     match Db.open(":memory:") {
+//         Ok(db) -> {
+//             let _ = db.exec("create table users (id integer primary key, name text)")
+//             let _ = db.exec("insert into users (name) values ('Alice'), ('Bob')")
+//
+//             match db.prepare("select id, name from users where id > ?") {
+//                 Ok(q) -> {
+//                     q.bind_int(1, 0)
+//                     while q.step() {
+//                         print("${q.int(0)}: ${q.text(1)}")
+//                     }
+//                     q.finalize()
+//                 },
+//                 Err(e) -> print(e),
+//             }
+//             db.close()
+//         },
+//         Err(e) -> print(e),
+//     }
+//
+// SQLite is bundled as C source and linked in, so a project that depends on
+// this package needs nothing installed (just a C compiler, which Raven's FFI
+// already requires).
+
+import std/string
+import std/ffi { to_cstr, free_cstr, from_cstr }
+
+// SQLite result codes used by the binding.
+const SQLITE_OK: Int = 0
+const SQLITE_ROW: Int = 100
+const SQLITE_NULL: Int = 5
+
+extern "C" {
+    fun rsq_open(path: CStr) -> Int
+    fun rsq_close(db: Int) -> Int
+    fun rsq_exec(db: Int, sql: CStr) -> Int
+    fun rsq_errmsg(db: Int) -> CStr
+    fun rsq_changes(db: Int) -> Int
+    fun rsq_last_insert_rowid(db: Int) -> Int
+    fun rsq_prepare(db: Int, sql: CStr) -> Int
+    fun rsq_step(stmt: Int) -> Int
+    fun rsq_reset(stmt: Int) -> Int
+    fun rsq_finalize(stmt: Int) -> Int
+    fun rsq_column_count(stmt: Int) -> Int
+    fun rsq_column_type(stmt: Int, col: Int) -> Int
+    fun rsq_column_int(stmt: Int, col: Int) -> Int
+    fun rsq_column_double(stmt: Int, col: Int) -> Float
+    fun rsq_column_text(stmt: Int, col: Int) -> CStr
+    fun rsq_bind_int(stmt: Int, idx: Int, v: Int) -> Int
+    fun rsq_bind_double(stmt: Int, idx: Int, v: Float) -> Int
+    fun rsq_bind_text(stmt: Int, idx: Int, v: CStr) -> Int
+    fun rsq_bind_null(stmt: Int, idx: Int) -> Int
+}
+
+// An open SQLite database connection.
+struct Db {
+    handle: Int,
+}
+
+impl Db {
+    // Open the database at `path`, creating the file if needed. Use ":memory:"
+    // for an in-memory database. Returns the connection, or an error string.
+    fun open(path: String) -> Result<Db, String> {
+        let c = to_cstr(path)
+        let handle = rsq_open(c)
+        free_cstr(c)
+        if handle == 0 {
+            return Err("could not open database: ${path}")
+        }
+        return Ok(Db { handle })
+    }
+
+    // Run one or more SQL statements that return no rows (CREATE, INSERT,
+    // UPDATE, DELETE, ...). Returns the number of rows changed, or an error.
+    fun exec(self, sql: String) -> Result<Int, String> {
+        let c = to_cstr(sql)
+        let rc = rsq_exec(self.handle, c)
+        free_cstr(c)
+        if rc != SQLITE_OK {
+            return Err(self.error())
+        }
+        return Ok(rsq_changes(self.handle))
+    }
+
+    // Compile `sql` into a prepared statement. Use `?` placeholders for
+    // parameters and bind them on the returned statement. Remember to call
+    // `finalize()` when done.
+    fun prepare(self, sql: String) -> Result<Stmt, String> {
+        let c = to_cstr(sql)
+        let handle = rsq_prepare(self.handle, c)
+        free_cstr(c)
+        if handle == 0 {
+            return Err(self.error())
+        }
+        return Ok(Stmt { handle, db: self.handle })
+    }
+
+    // The rowid of the most recent successful INSERT on this connection.
+    fun last_insert_id(self) -> Int {
+        return rsq_last_insert_rowid(self.handle)
+    }
+
+    // The number of rows changed by the most recent statement.
+    fun changes(self) -> Int {
+        return rsq_changes(self.handle)
+    }
+
+    // Close the connection and release its resources.
+    fun close(self) {
+        let _ = rsq_close(self.handle)
+    }
+
+    // The last error message from this connection.
+    fun error(self) -> String {
+        return from_cstr(rsq_errmsg(self.handle))
+    }
+}
+
+// A prepared statement: bind parameters, then step through result rows.
+struct Stmt {
+    handle: Int,
+    db: Int,
+}
+
+impl Stmt {
+    // Bind an integer to the 1-based parameter `idx`. Returns self for chaining.
+    fun bind_int(self, idx: Int, value: Int) -> Stmt {
+        let _ = rsq_bind_int(self.handle, idx, value)
+        return self
+    }
+
+    // Bind a float to the 1-based parameter `idx`. Returns self for chaining.
+    fun bind_float(self, idx: Int, value: Float) -> Stmt {
+        let _ = rsq_bind_double(self.handle, idx, value)
+        return self
+    }
+
+    // Bind a string to the 1-based parameter `idx`. Returns self for chaining.
+    fun bind_text(self, idx: Int, value: String) -> Stmt {
+        let c = to_cstr(value)
+        let _ = rsq_bind_text(self.handle, idx, c)
+        free_cstr(c)
+        return self
+    }
+
+    // Bind SQL NULL to the 1-based parameter `idx`. Returns self for chaining.
+    fun bind_null(self, idx: Int) -> Stmt {
+        let _ = rsq_bind_null(self.handle, idx)
+        return self
+    }
+
+    // Advance to the next result row. Returns true while a row is available,
+    // false once the result set is exhausted.
+    fun step(self) -> Bool {
+        return rsq_step(self.handle) == SQLITE_ROW
+    }
+
+    // The number of columns in the current result row.
+    fun column_count(self) -> Int {
+        return rsq_column_count(self.handle)
+    }
+
+    // Read the 0-based column `col` of the current row as an integer.
+    fun int(self, col: Int) -> Int {
+        return rsq_column_int(self.handle, col)
+    }
+
+    // Read the 0-based column `col` of the current row as a float.
+    fun float(self, col: Int) -> Float {
+        return rsq_column_double(self.handle, col)
+    }
+
+    // Read the 0-based column `col` of the current row as text.
+    fun text(self, col: Int) -> String {
+        return from_cstr(rsq_column_text(self.handle, col))
+    }
+
+    // True when the 0-based column `col` of the current row is SQL NULL.
+    fun is_null(self, col: Int) -> Bool {
+        return rsq_column_type(self.handle, col) == SQLITE_NULL
+    }
+
+    // Reset the statement so it can be stepped again, keeping bound values.
+    fun reset(self) -> Stmt {
+        let _ = rsq_reset(self.handle)
+        return self
+    }
+
+    // Release the statement. Call this when finished with it.
+    fun finalize(self) {
+        let _ = rsq_finalize(self.handle)
+    }
+}

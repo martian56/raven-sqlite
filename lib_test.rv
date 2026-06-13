@@ -1,0 +1,108 @@
+import std/string
+import std/test { assert_eq_int, assert_eq_str, assert_true, assert_msg }
+import "./lib" { Db, Stmt }
+
+fun test_create_insert_query() {
+    match Db.open(":memory:") {
+        Ok(db) -> {
+            match db.exec("create table t (id integer primary key, name text, score real)") {
+                Ok(n) -> {},
+                Err(e) -> assert_msg(false, e),
+            }
+            let _ = db.exec("insert into t (name, score) values ('Alice', 9.5)")
+            let _ = db.exec("insert into t (name, score) values ('Bob', 7.0)")
+            assert_eq_int(db.last_insert_id(), 2)
+
+            match db.prepare("select id, name, score from t order by id") {
+                Ok(q) -> {
+                    assert_true(q.step())
+                    assert_eq_int(q.int(0), 1)
+                    assert_eq_str(q.text(1), "Alice")
+                    assert_true(q.float(2) > 9.0)
+                    assert_true(q.step())
+                    assert_eq_str(q.text(1), "Bob")
+                    assert_true(!q.step())
+                    q.finalize()
+                },
+                Err(e) -> assert_msg(false, e),
+            }
+            db.close()
+        },
+        Err(e) -> assert_msg(false, e),
+    }
+}
+
+fun test_bound_parameters() {
+    match Db.open(":memory:") {
+        Ok(db) -> {
+            let _ = db.exec("create table nums (n integer)")
+            match db.prepare("insert into nums (n) values (?)") {
+                Ok(ins) -> {
+                    ins.bind_int(1, 42)
+                    let _ = ins.step()
+                    ins.finalize()
+                },
+                Err(e) -> assert_msg(false, e),
+            }
+            match db.prepare("select n from nums where n = ?") {
+                Ok(q) -> {
+                    q.bind_int(1, 42)
+                    assert_true(q.step())
+                    assert_eq_int(q.int(0), 42)
+                    q.finalize()
+                },
+                Err(e) -> assert_msg(false, e),
+            }
+            db.close()
+        },
+        Err(e) -> assert_msg(false, e),
+    }
+}
+
+fun test_exec_reports_changes() {
+    match Db.open(":memory:") {
+        Ok(db) -> {
+            let _ = db.exec("create table t (n integer)")
+            let _ = db.exec("insert into t values (1), (2), (3)")
+            match db.exec("update t set n = n + 1") {
+                Ok(changed) -> assert_eq_int(changed, 3),
+                Err(e) -> assert_msg(false, e),
+            }
+            db.close()
+        },
+        Err(e) -> assert_msg(false, e),
+    }
+}
+
+fun test_text_and_null() {
+    match Db.open(":memory:") {
+        Ok(db) -> {
+            let _ = db.exec("create table t (a text, b text)")
+            let _ = db.exec("insert into t (a, b) values ('hi', null)")
+            match db.prepare("select a, b from t") {
+                Ok(q) -> {
+                    assert_true(q.step())
+                    assert_eq_str(q.text(0), "hi")
+                    assert_true(q.is_null(1))
+                    q.finalize()
+                },
+                Err(e) -> assert_msg(false, e),
+            }
+            db.close()
+        },
+        Err(e) -> assert_msg(false, e),
+    }
+}
+
+fun test_bad_sql_errors() {
+    match Db.open(":memory:") {
+        Ok(db) -> {
+            match db.exec("this is not valid sql") {
+                Ok(n) -> assert_msg(false, "expected an error"),
+                Err(e) -> assert_true(e.length() > 0),
+            }
+            db.close()
+        },
+        Err(e) -> assert_msg(false, e),
+    }
+}
