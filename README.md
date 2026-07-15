@@ -1,5 +1,7 @@
 # raven-sqlite
 
+[![CI](https://github.com/martian56/raven-sqlite/actions/workflows/ci.yml/badge.svg)](https://github.com/martian56/raven-sqlite/actions/workflows/ci.yml)
+
 SQLite for Raven, with the database engine bundled in. There is no system
 SQLite to install: the C amalgamation ships with the package and is compiled and
 linked into your program by `rvpm build`. You only need a C compiler, which
@@ -9,7 +11,7 @@ Raven's FFI already requires.
 
 ```toml
 [dependencies]
-"github.com/martian56/raven-sqlite" = "0.1"
+"github.com/martian56/raven-sqlite" = "v0.2.0"
 ```
 
 Needs Raven 2.26.1 or newer.
