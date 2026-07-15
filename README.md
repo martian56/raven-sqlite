@@ -12,7 +12,7 @@ Raven's FFI already requires.
 "github.com/martian56/raven-sqlite" = "0.1"
 ```
 
-Needs Raven 2.18.65 or newer.
+Needs Raven 2.26.1 or newer.
 
 ## Usage
 
@@ -27,8 +27,16 @@ fun main() {
 
             match db.prepare("select id, name from users order by id") {
                 Ok(q) -> {
-                    while q.step() {
-                        print("${q.int(0)}: ${q.text(1)}")
+                    let reading = true
+                    while reading {
+                        match q.next() {
+                            Ok(true) -> print("${q.int(0)}: ${q.text(1)}"),
+                            Ok(false) -> reading = false,
+                            Err(message) -> {
+                                print("query failed: ${message}")
+                                reading = false
+                            },
+                        }
                     }
                     q.finalize()
                 },
@@ -45,16 +53,17 @@ Use `":memory:"` for an in-memory database, or a file path to persist to disk.
 
 ## Parameters
 
-Use `?` placeholders and bind by 1-based index. Binds are chainable:
+Use `?` placeholders and bind by 1-based index. Checked binds report invalid
+indices and other SQLite errors:
 
 ```rust
-match db.prepare("insert into users (name, age) values (?, ?)") {
-    Ok(ins) -> {
-        ins.bind_text(1, "Carol").bind_int(2, 31)
-        let _ = ins.step()
-        ins.finalize()
-    },
-    Err(e) -> print(e),
+fun insert_person(db: Db) -> Result<Bool, String> {
+    let statement = db.prepare("insert into users (name, age) values (?, ?)")?
+    let _ = statement.try_bind_text(1, "Carol")?
+    let _ = statement.try_bind_int(2, 31)?
+    let _ = statement.next()?
+    let _ = statement.try_finalize()?
+    return Ok(true)
 }
 ```
 
@@ -69,17 +78,30 @@ match db.prepare("insert into users (name, age) values (?, ?)") {
 - `db.prepare(sql) -> Result<Stmt, String>`: compile a statement with `?`
   placeholders.
 - `db.last_insert_id() -> Int` and `db.changes() -> Int`.
-- `db.close()`.
+- `db.set_busy_timeout_ms(ms)` configures lock waiting.
+- `db.try_close()` reports live statements that prevent closing. `db.close()`
+  remains as a compatibility convenience when the result is intentionally
+  ignored.
 
 ### `Stmt`
 
-- `bind_int(i, v)`, `bind_float(i, v)`, `bind_text(i, v)`, `bind_null(i)`: bind
-  the 1-based parameter `i`. Each returns the statement, so calls chain.
-- `step() -> Bool`: advance to the next row; true while a row is available.
+- `try_bind_int`, `try_bind_float`, `try_bind_text`, and `try_bind_null`: bind
+  the 1-based parameter and return `Result<Stmt, String>`.
+- The original chainable `bind_int`, `bind_float`, `bind_text`, and `bind_null`
+  remain available for compatibility when bind errors are intentionally
+  ignored.
+- `next() -> Result<Bool, String>` advances to the next row and distinguishes
+  normal completion from constraint, locking, I/O, and execution failures.
+- `step() -> Bool` is the legacy lossy form; prefer `next()`.
 - `int(col)`, `float(col)`, `text(col)`, `is_null(col)`: read the 0-based column
   of the current row.
-- `column_count() -> Int`.
-- `reset()` to run the statement again, `finalize()` when finished.
+- `try_int`, `try_float`, `try_text`, and `try_is_null` additionally validate
+  the column index.
+- `column_count()`, `column_name(col)`, and `parameter_count()` expose statement
+  metadata.
+- `try_reset()` and `clear_bindings()` support safe statement reuse.
+- `try_finalize()` reports the last execution error while releasing the
+  statement. `finalize()` is the compatibility form that ignores it.
 
 ## How it works
 
@@ -95,6 +117,24 @@ pointers to manage.
   not release them for you.
 - Bind parameter indices are 1-based and column indices are 0-based, following
   SQLite's own conventions.
+- Text binding and retrieval preserve embedded NUL bytes instead of truncating
+  them at the C string boundary.
+- SQL strings and database paths reject embedded NUL bytes explicitly.
+
+## Testing
+
+The test suite is fully self-contained because SQLite is bundled:
+
+```bash
+rvpm fmt --check
+rvpm build
+rvpm test
+rvpm doc
+```
+
+CI runs the same suite on Linux and Windows. Coverage includes checked binding
+and column failures, constraint errors during stepping, transactions, statement
+reuse, connection-close failures, Unicode, embedded NUL bytes, and large text.
 
 ## License
 
