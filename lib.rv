@@ -32,6 +32,7 @@ import std/ffi { to_cstr, free_cstr, from_cstr }
 // SQLite result codes used by the binding.
 const SQLITE_OK: Int = 0
 const SQLITE_ROW: Int = 100
+const SQLITE_DONE: Int = 101
 const SQLITE_NULL: Int = 5
 
 extern "C" {
@@ -39,21 +40,54 @@ extern "C" {
     fun rsq_close(db: Int) -> Int
     fun rsq_exec(db: Int, sql: CStr) -> Int
     fun rsq_errmsg(db: Int) -> CStr
+    fun rsq_errcode(db: Int) -> Int
     fun rsq_changes(db: Int) -> Int
     fun rsq_last_insert_rowid(db: Int) -> Int
+    fun rsq_busy_timeout(db: Int, milliseconds: Int) -> Int
     fun rsq_prepare(db: Int, sql: CStr) -> Int
     fun rsq_step(stmt: Int) -> Int
     fun rsq_reset(stmt: Int) -> Int
     fun rsq_finalize(stmt: Int) -> Int
+    fun rsq_clear_bindings(stmt: Int) -> Int
+    fun rsq_bind_parameter_count(stmt: Int) -> Int
     fun rsq_column_count(stmt: Int) -> Int
+    fun rsq_column_name(stmt: Int, col: Int) -> CStr
     fun rsq_column_type(stmt: Int, col: Int) -> Int
     fun rsq_column_int(stmt: Int, col: Int) -> Int
     fun rsq_column_double(stmt: Int, col: Int) -> Float
     fun rsq_column_text(stmt: Int, col: Int) -> CStr
+    fun rsq_column_bytes(stmt: Int, col: Int) -> Int
+    fun rsq_column_has_nul(stmt: Int, col: Int) -> Int
+    fun rsq_column_text_hex(stmt: Int, col: Int) -> CStr
+    fun rsq_free(value: CStr)
     fun rsq_bind_int(stmt: Int, idx: Int, v: Int) -> Int
     fun rsq_bind_double(stmt: Int, idx: Int, v: Float) -> Int
     fun rsq_bind_text(stmt: Int, idx: Int, v: CStr) -> Int
+    fun rsq_bind_text_len(stmt: Int, idx: Int, v: CStr, length: Int) -> Int
     fun rsq_bind_null(stmt: Int, idx: Int) -> Int
+}
+
+fun has_nul(value: String) -> Bool {
+    return value.contains(__str_from_byte(0))
+}
+
+fun hex_nibble(byte: Int) -> Int {
+    if byte >= 48 && byte <= 57 {
+        return byte - 48
+    }
+    return byte - 87
+}
+
+fun decode_hex(value: String) -> String {
+    let out = ""
+    let i = 0
+    while i < value.length() {
+        let high = hex_nibble(__str_byte_at(value, i))
+        let low = hex_nibble(__str_byte_at(value, i + 1))
+        out = out.concat(__str_from_byte(high * 16 + low))
+        i = i + 2
+    }
+    return out
 }
 
 // An open SQLite database connection.
@@ -65,11 +99,19 @@ impl Db {
     // Open the database at `path`, creating the file if needed. Use ":memory:"
     // for an in-memory database. Returns the connection, or an error string.
     fun open(path: String) -> Result<Db, String> {
+        if has_nul(path) {
+            return Err("database path cannot contain a NUL byte")
+        }
         let c = to_cstr(path)
         let handle = rsq_open(c)
         free_cstr(c)
         if handle == 0 {
-            return Err("could not open database: ${path}")
+            return Err("could not allocate a SQLite database handle")
+        }
+        if rsq_errcode(handle) != SQLITE_OK {
+            let message = from_cstr(rsq_errmsg(handle))
+            let _ = rsq_close(handle)
+            return Err(message)
         }
         return Ok(Db { handle })
     }
@@ -77,6 +119,9 @@ impl Db {
     // Run one or more SQL statements that return no rows (CREATE, INSERT,
     // UPDATE, DELETE, ...). Returns the number of rows changed, or an error.
     fun exec(self, sql: String) -> Result<Int, String> {
+        if has_nul(sql) {
+            return Err("SQL cannot contain a NUL byte")
+        }
         let c = to_cstr(sql)
         let rc = rsq_exec(self.handle, c)
         free_cstr(c)
@@ -90,6 +135,9 @@ impl Db {
     // parameters and bind them on the returned statement. Remember to call
     // `finalize()` when done.
     fun prepare(self, sql: String) -> Result<Stmt, String> {
+        if has_nul(sql) {
+            return Err("SQL cannot contain a NUL byte")
+        }
         let c = to_cstr(sql)
         let handle = rsq_prepare(self.handle, c)
         free_cstr(c)
@@ -109,9 +157,32 @@ impl Db {
         return rsq_changes(self.handle)
     }
 
+    // Wait up to `milliseconds` when another connection holds a database
+    // lock. Zero disables waiting. Negative durations are rejected.
+    fun set_busy_timeout_ms(self, milliseconds: Int) -> Result<Bool, String> {
+        if milliseconds < 0 {
+            return Err("busy timeout cannot be negative")
+        }
+        let rc = rsq_busy_timeout(self.handle, milliseconds)
+        if rc != SQLITE_OK {
+            return Err(self.error())
+        }
+        return Ok(true)
+    }
+
+    // Close the connection and surface SQLITE_BUSY when statements remain
+    // unfinalized. The connection remains usable after a failed close.
+    fun try_close(self) -> Result<Bool, String> {
+        let rc = rsq_close(self.handle)
+        if rc != SQLITE_OK {
+            return Err(self.error())
+        }
+        return Ok(true)
+    }
+
     // Close the connection and release its resources.
     fun close(self) {
-        let _ = rsq_close(self.handle)
+        let _ = self.try_close()
     }
 
     // The last error message from this connection.
@@ -127,10 +198,26 @@ struct Stmt {
 }
 
 impl Stmt {
+    fun bind_result(self, rc: Int) -> Result<Stmt, String> {
+        if rc != SQLITE_OK {
+            return Err(self.error())
+        }
+        return Ok(self)
+    }
+
+    // Checked binding variants report invalid indices and SQLite failures.
+    fun try_bind_int(self, idx: Int, value: Int) -> Result<Stmt, String> {
+        return self.bind_result(rsq_bind_int(self.handle, idx, value))
+    }
+
     // Bind an integer to the 1-based parameter `idx`. Returns self for chaining.
     fun bind_int(self, idx: Int, value: Int) -> Stmt {
         let _ = rsq_bind_int(self.handle, idx, value)
         return self
+    }
+
+    fun try_bind_float(self, idx: Int, value: Float) -> Result<Stmt, String> {
+        return self.bind_result(rsq_bind_double(self.handle, idx, value))
     }
 
     // Bind a float to the 1-based parameter `idx`. Returns self for chaining.
@@ -139,12 +226,23 @@ impl Stmt {
         return self
     }
 
+    fun try_bind_text(self, idx: Int, value: String) -> Result<Stmt, String> {
+        let c = to_cstr(value)
+        let rc = rsq_bind_text_len(self.handle, idx, c, value.length())
+        free_cstr(c)
+        return self.bind_result(rc)
+    }
+
     // Bind a string to the 1-based parameter `idx`. Returns self for chaining.
     fun bind_text(self, idx: Int, value: String) -> Stmt {
         let c = to_cstr(value)
-        let _ = rsq_bind_text(self.handle, idx, c)
+        let _ = rsq_bind_text_len(self.handle, idx, c, value.length())
         free_cstr(c)
         return self
+    }
+
+    fun try_bind_null(self, idx: Int) -> Result<Stmt, String> {
+        return self.bind_result(rsq_bind_null(self.handle, idx))
     }
 
     // Bind SQL NULL to the 1-based parameter `idx`. Returns self for chaining.
@@ -153,10 +251,31 @@ impl Stmt {
         return self
     }
 
+    // Advance to the next row, distinguishing normal completion from a
+    // constraint, lock, I/O, or other SQLite error.
+    fun next(self) -> Result<Bool, String> {
+        let rc = rsq_step(self.handle)
+        if rc == SQLITE_ROW {
+            return Ok(true)
+        }
+        if rc == SQLITE_DONE {
+            return Ok(false)
+        }
+        return Err(self.error())
+    }
+
     // Advance to the next result row. Returns true while a row is available,
-    // false once the result set is exhausted.
+    // false once the result set is exhausted or an error occurs. New code
+    // should use `next()` so execution errors are not discarded.
     fun step(self) -> Bool {
-        return rsq_step(self.handle) == SQLITE_ROW
+        return match self.next() {
+            Ok(has_row) -> has_row,
+            Err(message) -> false,
+        }
+    }
+
+    fun parameter_count(self) -> Int {
+        return rsq_bind_parameter_count(self.handle)
     }
 
     // The number of columns in the current result row.
@@ -164,9 +283,24 @@ impl Stmt {
         return rsq_column_count(self.handle)
     }
 
+    fun column_name(self, col: Int) -> String {
+        return from_cstr(rsq_column_name(self.handle, col))
+    }
+
+    fun valid_column(self, col: Int) -> Bool {
+        return col >= 0 && col < self.column_count()
+    }
+
     // Read the 0-based column `col` of the current row as an integer.
     fun int(self, col: Int) -> Int {
         return rsq_column_int(self.handle, col)
+    }
+
+    fun try_int(self, col: Int) -> Result<Int, String> {
+        if !self.valid_column(col) {
+            return Err("column index ${col} is out of range")
+        }
+        return Ok(self.int(col))
     }
 
     // Read the 0-based column `col` of the current row as a float.
@@ -174,9 +308,29 @@ impl Stmt {
         return rsq_column_double(self.handle, col)
     }
 
+    fun try_float(self, col: Int) -> Result<Float, String> {
+        if !self.valid_column(col) {
+            return Err("column index ${col} is out of range")
+        }
+        return Ok(self.float(col))
+    }
+
     // Read the 0-based column `col` of the current row as text.
     fun text(self, col: Int) -> String {
-        return from_cstr(rsq_column_text(self.handle, col))
+        if rsq_column_has_nul(self.handle, col) == 0 {
+            return from_cstr(rsq_column_text(self.handle, col))
+        }
+        let encoded = rsq_column_text_hex(self.handle, col)
+        let hex = from_cstr(encoded)
+        rsq_free(encoded)
+        return decode_hex(hex)
+    }
+
+    fun try_text(self, col: Int) -> Result<String, String> {
+        if !self.valid_column(col) {
+            return Err("column index ${col} is out of range")
+        }
+        return Ok(self.text(col))
     }
 
     // True when the 0-based column `col` of the current row is SQL NULL.
@@ -184,10 +338,45 @@ impl Stmt {
         return rsq_column_type(self.handle, col) == SQLITE_NULL
     }
 
+    fun try_is_null(self, col: Int) -> Result<Bool, String> {
+        if !self.valid_column(col) {
+            return Err("column index ${col} is out of range")
+        }
+        return Ok(self.is_null(col))
+    }
+
+    fun error(self) -> String {
+        return from_cstr(rsq_errmsg(self.db))
+    }
+
+    fun try_reset(self) -> Result<Stmt, String> {
+        let rc = rsq_reset(self.handle)
+        if rc != SQLITE_OK {
+            return Err(self.error())
+        }
+        return Ok(self)
+    }
+
     // Reset the statement so it can be stepped again, keeping bound values.
     fun reset(self) -> Stmt {
         let _ = rsq_reset(self.handle)
         return self
+    }
+
+    fun clear_bindings(self) -> Result<Stmt, String> {
+        let rc = rsq_clear_bindings(self.handle)
+        if rc != SQLITE_OK {
+            return Err(self.error())
+        }
+        return Ok(self)
+    }
+
+    fun try_finalize(self) -> Result<Bool, String> {
+        let rc = rsq_finalize(self.handle)
+        if rc != SQLITE_OK {
+            return Err(self.error())
+        }
+        return Ok(true)
     }
 
     // Release the statement. Call this when finished with it.

@@ -2,6 +2,20 @@ import std/string
 import std/test { assert_eq_int, assert_eq_str, assert_true, assert_msg }
 import "./lib" { Db, Stmt }
 
+fun must<T>(result: Result<T, String>) -> T {
+    return match result {
+        Ok(value) -> value,
+        Err(message) -> {
+            __panic(message)
+            must(result)
+        },
+    }
+}
+
+fun open_memory() -> Db {
+    return must(Db.open(":memory:"))
+}
+
 fun test_create_insert_query() {
     match Db.open(":memory:") {
         Ok(db) -> {
@@ -105,4 +119,178 @@ fun test_bad_sql_errors() {
         },
         Err(e) -> assert_msg(false, e),
     }
+}
+
+fun test_checked_bindings_and_parameter_count() {
+    let db = open_memory()
+    let statement = must(db.prepare("select ?, ?, ?"))
+    assert_eq_int(statement.parameter_count(), 3)
+    let _ = must(statement.try_bind_int(1, 42))
+    let _ = must(statement.try_bind_float(2, 3.5))
+    let _ = must(statement.try_bind_null(3))
+    assert_true(must(statement.next()))
+    assert_eq_int(must(statement.try_int(0)), 42)
+    assert_true(must(statement.try_float(1)) > 3.0)
+    assert_true(must(statement.try_is_null(2)))
+    assert_true(!must(statement.next()))
+    let _ = must(statement.try_finalize())
+    let _ = must(db.try_close())
+}
+
+fun test_invalid_bind_and_column_indices_return_errors() {
+    let db = open_memory()
+    let statement = must(db.prepare("select ?"))
+    match statement.try_bind_text(2, "out of range") {
+        Ok(value) -> assert_msg(false, "invalid parameter index unexpectedly succeeded"),
+        Err(message) -> assert_msg(message.contains("column index out of range"), message),
+    }
+    let _ = must(statement.try_bind_text(1, "ok"))
+    assert_true(must(statement.next()))
+    match statement.try_text(1) {
+        Ok(value) -> assert_msg(false, "invalid column index unexpectedly succeeded"),
+        Err(message) -> assert_msg(message.contains("out of range"), message),
+    }
+    match statement.try_int(-1) {
+        Ok(value) -> assert_msg(false, "negative column index unexpectedly succeeded"),
+        Err(message) -> assert_msg(message.contains("out of range"), message),
+    }
+    statement.finalize()
+    db.close()
+}
+
+fun test_step_errors_are_not_reported_as_end_of_rows() {
+    let db = open_memory()
+    let _ = must(db.exec("create table unique_names (name text unique)"))
+    let statement = must(db.prepare("insert into unique_names values (?)"))
+    let _ = must(statement.try_bind_text(1, "Ada"))
+    assert_true(!must(statement.next()))
+    let _ = must(statement.try_reset())
+    let _ = must(statement.try_bind_text(1, "Ada"))
+    match statement.next() {
+        Ok(has_row) -> assert_msg(false, "constraint error unexpectedly looked successful"),
+        Err(message) -> assert_msg(message.contains("UNIQUE constraint failed"), message),
+    }
+    match statement.try_finalize() {
+        Ok(value) -> assert_msg(false, "finalize discarded the prior constraint error"),
+        Err(message) -> assert_msg(message.contains("UNIQUE constraint failed"), message),
+    }
+    db.close()
+}
+
+fun test_embedded_nul_and_unicode_text_round_trip() {
+    let db = open_memory()
+    let _ = must(db.exec("create table text_values (value text)"))
+    let value = "before".concat(__str_from_byte(0)).concat("after 🐦")
+    let insert = must(db.prepare("insert into text_values values (?)"))
+    let _ = must(insert.try_bind_text(1, value))
+    assert_true(!must(insert.next()))
+    insert.finalize()
+    let query = must(db.prepare("select value from text_values"))
+    assert_true(must(query.next()))
+    assert_eq_str(query.text(0), value)
+    query.finalize()
+    db.close()
+}
+
+fun test_column_names_and_checked_text_access() {
+    let db = open_memory()
+    let query = must(db.prepare("select 1 as identifier, 'Ada' as display_name"))
+    assert_eq_int(query.column_count(), 2)
+    assert_eq_str(query.column_name(0), "identifier")
+    assert_eq_str(query.column_name(1), "display_name")
+    assert_true(must(query.next()))
+    assert_eq_str(must(query.try_text(1)), "Ada")
+    query.finalize()
+    db.close()
+}
+
+fun test_clear_bindings_restores_sql_null() {
+    let db = open_memory()
+    let query = must(db.prepare("select ?"))
+    let _ = must(query.try_bind_text(1, "present"))
+    assert_true(must(query.next()))
+    assert_eq_str(query.text(0), "present")
+    let _ = must(query.try_reset())
+    let _ = must(query.clear_bindings())
+    assert_true(must(query.next()))
+    assert_true(query.is_null(0))
+    query.finalize()
+    db.close()
+}
+
+fun test_close_reports_unfinalized_statements() {
+    let db = open_memory()
+    let statement = must(db.prepare("select 1"))
+    match db.try_close() {
+        Ok(value) -> assert_msg(false, "close unexpectedly ignored a live statement"),
+        Err(message) -> assert_msg(message.length() > 0, "close error should have a message"),
+    }
+    statement.finalize()
+    assert_true(must(db.try_close()))
+}
+
+fun test_busy_timeout_and_nul_input_validation() {
+    let db = open_memory()
+    assert_true(must(db.set_busy_timeout_ms(250)))
+    match db.set_busy_timeout_ms(-1) {
+        Ok(value) -> assert_msg(false, "negative busy timeout unexpectedly succeeded"),
+        Err(message) -> assert_msg(message.contains("cannot be negative"), message),
+    }
+    let nul_sql = "select 1".concat(__str_from_byte(0)).concat("; select 2")
+    match db.prepare(nul_sql) {
+        Ok(statement) -> assert_msg(false, "NUL-containing SQL unexpectedly compiled"),
+        Err(message) -> assert_msg(message.contains("NUL"), message),
+    }
+    db.close()
+    let nul_path = "bad".concat(__str_from_byte(0)).concat("path")
+    match Db.open(nul_path) {
+        Ok(opened) -> assert_msg(false, "NUL-containing path unexpectedly opened"),
+        Err(message) -> assert_msg(message.contains("NUL"), message),
+    }
+    match Db.open("target/missing-parent-for-open-test/nested/database.sqlite") {
+        Ok(opened) -> {
+            opened.close()
+            assert_msg(false, "database in a missing directory unexpectedly opened")
+        },
+        Err(message) -> assert_msg(message.contains("unable to open"), message),
+    }
+}
+
+fun test_transactions_can_commit_and_roll_back() {
+    let db = open_memory()
+    let _ = must(db.exec("create table transactions (value integer)"))
+    let _ = must(db.exec("begin"))
+    let _ = must(db.exec("insert into transactions values (1)"))
+    let _ = must(db.exec("rollback"))
+    let rolled_back = must(db.prepare("select count(*) from transactions"))
+    assert_true(must(rolled_back.next()))
+    assert_eq_int(rolled_back.int(0), 0)
+    rolled_back.finalize()
+    let _ = must(db.exec("begin"))
+    let _ = must(db.exec("insert into transactions values (2)"))
+    let _ = must(db.exec("commit"))
+    let committed = must(db.prepare("select value from transactions"))
+    assert_true(must(committed.next()))
+    assert_eq_int(committed.int(0), 2)
+    committed.finalize()
+    db.close()
+}
+
+fun test_large_text_round_trip() {
+    let db = open_memory()
+    let _ = must(db.exec("create table large_values (value text)"))
+    let value = "0123456789abcdef"
+    while value.length() < 262144 {
+        value = value.concat(value)
+    }
+    let insert = must(db.prepare("insert into large_values values (?)"))
+    let _ = must(insert.try_bind_text(1, value))
+    assert_true(!must(insert.next()))
+    insert.finalize()
+    let query = must(db.prepare("select value from large_values"))
+    assert_true(must(query.next()))
+    assert_eq_int(query.text(0).length(), value.length())
+    assert_eq_str(query.text(0), value)
+    query.finalize()
+    db.close()
 }
