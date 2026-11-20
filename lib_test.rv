@@ -1,14 +1,14 @@
-import std/string
-import std/test { assert_eq_int, assert_eq_str, assert_true, assert_msg }
-import "./lib" { Db, Stmt }
+import std.string
+from std.test import assert_eq_int, assert_eq_str, assert_true, assert_msg
+from "./lib" import Db, Stmt
 
-fun must<T>(result: Result<T, String>) -> T {
+fun must[T](result: Result[T, str]) -> T {
     return match result {
-        Ok(value) -> value,
-        Err(message) -> {
+        case Ok(value) { value }
+        case Err(message) {
             __panic(message)
             must(result)
-        },
+        }
     }
 }
 
@@ -18,106 +18,106 @@ fun open_memory() -> Db {
 
 fun test_create_insert_query() {
     match Db.open(":memory:") {
-        Ok(db) -> {
+        case Ok(db) {
             match db.exec("create table t (id integer primary key, name text, score real)") {
-                Ok(n) -> {},
-                Err(e) -> assert_msg(false, e),
+                case Ok(n) {}
+                case Err(e) { assert_msg(false, e) }
             }
             let _ = db.exec("insert into t (name, score) values ('Alice', 9.5)")
             let _ = db.exec("insert into t (name, score) values ('Bob', 7.0)")
             assert_eq_int(db.last_insert_id(), 2)
 
             match db.prepare("select id, name, score from t order by id") {
-                Ok(q) -> {
+                case Ok(q) {
                     assert_true(q.step())
                     assert_eq_int(q.int(0), 1)
                     assert_eq_str(q.text(1), "Alice")
                     assert_true(q.float(2) > 9.0)
                     assert_true(q.step())
                     assert_eq_str(q.text(1), "Bob")
-                    assert_true(!q.step())
+                    assert_true(not q.step())
                     q.finalize()
-                },
-                Err(e) -> assert_msg(false, e),
+                }
+                case Err(e) { assert_msg(false, e) }
             }
             db.close()
-        },
-        Err(e) -> assert_msg(false, e),
+        }
+        case Err(e) { assert_msg(false, e) }
     }
 }
 
 fun test_bound_parameters() {
     match Db.open(":memory:") {
-        Ok(db) -> {
+        case Ok(db) {
             let _ = db.exec("create table nums (n integer)")
             match db.prepare("insert into nums (n) values (?)") {
-                Ok(ins) -> {
+                case Ok(ins) {
                     ins.bind_int(1, 42)
                     let _ = ins.step()
                     ins.finalize()
-                },
-                Err(e) -> assert_msg(false, e),
+                }
+                case Err(e) { assert_msg(false, e) }
             }
             match db.prepare("select n from nums where n = ?") {
-                Ok(q) -> {
+                case Ok(q) {
                     q.bind_int(1, 42)
                     assert_true(q.step())
                     assert_eq_int(q.int(0), 42)
                     q.finalize()
-                },
-                Err(e) -> assert_msg(false, e),
+                }
+                case Err(e) { assert_msg(false, e) }
             }
             db.close()
-        },
-        Err(e) -> assert_msg(false, e),
+        }
+        case Err(e) { assert_msg(false, e) }
     }
 }
 
 fun test_exec_reports_changes() {
     match Db.open(":memory:") {
-        Ok(db) -> {
+        case Ok(db) {
             let _ = db.exec("create table t (n integer)")
             let _ = db.exec("insert into t values (1), (2), (3)")
             match db.exec("update t set n = n + 1") {
-                Ok(changed) -> assert_eq_int(changed, 3),
-                Err(e) -> assert_msg(false, e),
+                case Ok(changed) { assert_eq_int(changed, 3) }
+                case Err(e) { assert_msg(false, e) }
             }
             db.close()
-        },
-        Err(e) -> assert_msg(false, e),
+        }
+        case Err(e) { assert_msg(false, e) }
     }
 }
 
 fun test_text_and_null() {
     match Db.open(":memory:") {
-        Ok(db) -> {
+        case Ok(db) {
             let _ = db.exec("create table t (a text, b text)")
             let _ = db.exec("insert into t (a, b) values ('hi', null)")
             match db.prepare("select a, b from t") {
-                Ok(q) -> {
+                case Ok(q) {
                     assert_true(q.step())
                     assert_eq_str(q.text(0), "hi")
                     assert_true(q.is_null(1))
                     q.finalize()
-                },
-                Err(e) -> assert_msg(false, e),
+                }
+                case Err(e) { assert_msg(false, e) }
             }
             db.close()
-        },
-        Err(e) -> assert_msg(false, e),
+        }
+        case Err(e) { assert_msg(false, e) }
     }
 }
 
 fun test_bad_sql_errors() {
     match Db.open(":memory:") {
-        Ok(db) -> {
+        case Ok(db) {
             match db.exec("this is not valid sql") {
-                Ok(n) -> assert_msg(false, "expected an error"),
-                Err(e) -> assert_true(e.length() > 0),
+                case Ok(n) { assert_msg(false, "expected an error") }
+                case Err(e) { assert_true(e.length() > 0) }
             }
             db.close()
-        },
-        Err(e) -> assert_msg(false, e),
+        }
+        case Err(e) { assert_msg(false, e) }
     }
 }
 
@@ -132,7 +132,7 @@ fun test_checked_bindings_and_parameter_count() {
     assert_eq_int(must(statement.try_int(0)), 42)
     assert_true(must(statement.try_float(1)) > 3.0)
     assert_true(must(statement.try_is_null(2)))
-    assert_true(!must(statement.next()))
+    assert_true(not must(statement.next()))
     let _ = must(statement.try_finalize())
     let _ = must(db.try_close())
 }
@@ -141,18 +141,18 @@ fun test_invalid_bind_and_column_indices_return_errors() {
     let db = open_memory()
     let statement = must(db.prepare("select ?"))
     match statement.try_bind_text(2, "out of range") {
-        Ok(value) -> assert_msg(false, "invalid parameter index unexpectedly succeeded"),
-        Err(message) -> assert_msg(message.contains("column index out of range"), message),
+        case Ok(value) { assert_msg(false, "invalid parameter index unexpectedly succeeded") }
+        case Err(message) { assert_msg(message.contains("column index out of range"), message) }
     }
     let _ = must(statement.try_bind_text(1, "ok"))
     assert_true(must(statement.next()))
     match statement.try_text(1) {
-        Ok(value) -> assert_msg(false, "invalid column index unexpectedly succeeded"),
-        Err(message) -> assert_msg(message.contains("out of range"), message),
+        case Ok(value) { assert_msg(false, "invalid column index unexpectedly succeeded") }
+        case Err(message) { assert_msg(message.contains("out of range"), message) }
     }
     match statement.try_int(-1) {
-        Ok(value) -> assert_msg(false, "negative column index unexpectedly succeeded"),
-        Err(message) -> assert_msg(message.contains("out of range"), message),
+        case Ok(value) { assert_msg(false, "negative column index unexpectedly succeeded") }
+        case Err(message) { assert_msg(message.contains("out of range"), message) }
     }
     statement.finalize()
     db.close()
@@ -163,16 +163,16 @@ fun test_step_errors_are_not_reported_as_end_of_rows() {
     let _ = must(db.exec("create table unique_names (name text unique)"))
     let statement = must(db.prepare("insert into unique_names values (?)"))
     let _ = must(statement.try_bind_text(1, "Ada"))
-    assert_true(!must(statement.next()))
+    assert_true(not must(statement.next()))
     let _ = must(statement.try_reset())
     let _ = must(statement.try_bind_text(1, "Ada"))
     match statement.next() {
-        Ok(has_row) -> assert_msg(false, "constraint error unexpectedly looked successful"),
-        Err(message) -> assert_msg(message.contains("UNIQUE constraint failed"), message),
+        case Ok(has_row) { assert_msg(false, "constraint error unexpectedly looked successful") }
+        case Err(message) { assert_msg(message.contains("UNIQUE constraint failed"), message) }
     }
     match statement.try_finalize() {
-        Ok(value) -> assert_msg(false, "finalize discarded the prior constraint error"),
-        Err(message) -> assert_msg(message.contains("UNIQUE constraint failed"), message),
+        case Ok(value) { assert_msg(false, "finalize discarded the prior constraint error") }
+        case Err(message) { assert_msg(message.contains("UNIQUE constraint failed"), message) }
     }
     db.close()
 }
@@ -183,7 +183,7 @@ fun test_embedded_nul_and_unicode_text_round_trip() {
     let value = "before".concat(__str_from_byte(0)).concat("after 🐦")
     let insert = must(db.prepare("insert into text_values values (?)"))
     let _ = must(insert.try_bind_text(1, value))
-    assert_true(!must(insert.next()))
+    assert_true(not must(insert.next()))
     insert.finalize()
     let query = must(db.prepare("select value from text_values"))
     assert_true(must(query.next()))
@@ -222,8 +222,8 @@ fun test_close_reports_unfinalized_statements() {
     let db = open_memory()
     let statement = must(db.prepare("select 1"))
     match db.try_close() {
-        Ok(value) -> assert_msg(false, "close unexpectedly ignored a live statement"),
-        Err(message) -> assert_msg(message.length() > 0, "close error should have a message"),
+        case Ok(value) { assert_msg(false, "close unexpectedly ignored a live statement") }
+        case Err(message) { assert_msg(message.length() > 0, "close error should have a message") }
     }
     statement.finalize()
     assert_true(must(db.try_close()))
@@ -233,26 +233,26 @@ fun test_busy_timeout_and_nul_input_validation() {
     let db = open_memory()
     assert_true(must(db.set_busy_timeout_ms(250)))
     match db.set_busy_timeout_ms(-1) {
-        Ok(value) -> assert_msg(false, "negative busy timeout unexpectedly succeeded"),
-        Err(message) -> assert_msg(message.contains("cannot be negative"), message),
+        case Ok(value) { assert_msg(false, "negative busy timeout unexpectedly succeeded") }
+        case Err(message) { assert_msg(message.contains("cannot be negative"), message) }
     }
     let nul_sql = "select 1".concat(__str_from_byte(0)).concat("; select 2")
     match db.prepare(nul_sql) {
-        Ok(statement) -> assert_msg(false, "NUL-containing SQL unexpectedly compiled"),
-        Err(message) -> assert_msg(message.contains("NUL"), message),
+        case Ok(statement) { assert_msg(false, "NUL-containing SQL unexpectedly compiled") }
+        case Err(message) { assert_msg(message.contains("NUL"), message) }
     }
     db.close()
     let nul_path = "bad".concat(__str_from_byte(0)).concat("path")
     match Db.open(nul_path) {
-        Ok(opened) -> assert_msg(false, "NUL-containing path unexpectedly opened"),
-        Err(message) -> assert_msg(message.contains("NUL"), message),
+        case Ok(opened) { assert_msg(false, "NUL-containing path unexpectedly opened") }
+        case Err(message) { assert_msg(message.contains("NUL"), message) }
     }
     match Db.open("target/missing-parent-for-open-test/nested/database.sqlite") {
-        Ok(opened) -> {
+        case Ok(opened) {
             opened.close()
             assert_msg(false, "database in a missing directory unexpectedly opened")
-        },
-        Err(message) -> assert_msg(message.contains("unable to open"), message),
+        }
+        case Err(message) { assert_msg(message.contains("unable to open"), message) }
     }
 }
 
@@ -279,13 +279,13 @@ fun test_transactions_can_commit_and_roll_back() {
 fun test_large_text_round_trip() {
     let db = open_memory()
     let _ = must(db.exec("create table large_values (value text)"))
-    let value = "0123456789abcdef"
+    var value = "0123456789abcdef"
     while value.length() < 262144 {
         value = value.concat(value)
     }
     let insert = must(db.prepare("insert into large_values values (?)"))
     let _ = must(insert.try_bind_text(1, value))
-    assert_true(!must(insert.next()))
+    assert_true(not must(insert.next()))
     insert.finalize()
     let query = must(db.prepare("select value from large_values"))
     assert_true(must(query.next()))
