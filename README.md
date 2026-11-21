@@ -11,42 +11,44 @@ Raven's FFI already requires.
 
 ```toml
 [dependencies]
-"github.com/martian56/raven-sqlite" = "v0.2.0"
+"github.com/martian56/raven-sqlite" = "v0.3.0"
 ```
 
-Needs Raven 2.26.1 or newer.
+Needs Raven 3.0.0 or newer.
 
 ## Usage
 
 ```rust
-import "github.com/martian56/raven-sqlite" { Db }
+from "github.com/martian56/raven-sqlite" import Db
 
 fun main() {
     match Db.open(":memory:") {
-        Ok(db) -> {
+        case Ok(db) {
             let _ = db.exec("create table users (id integer primary key, name text)")
             let _ = db.exec("insert into users (name) values ('Alice'), ('Bob')")
 
             match db.prepare("select id, name from users order by id") {
-                Ok(q) -> {
-                    let reading = true
+                case Ok(q) {
+                    var reading = true
                     while reading {
                         match q.next() {
-                            Ok(true) -> print("${q.int(0)}: ${q.text(1)}"),
-                            Ok(false) -> reading = false,
-                            Err(message) -> {
+                            case Ok(true) { print("${q.int(0)}: ${q.text(1)}") }
+                            case Ok(false) {
+                                reading = false
+                            }
+                            case Err(message) {
                                 print("query failed: ${message}")
                                 reading = false
-                            },
+                            }
                         }
                     }
                     q.finalize()
-                },
-                Err(e) -> print(e),
+                }
+                case Err(e) { print(e) }
             }
             db.close()
-        },
-        Err(e) -> print(e),
+        }
+        case Err(e) { print(e) }
     }
 }
 ```
@@ -59,7 +61,7 @@ Use `?` placeholders and bind by 1-based index. Checked binds report invalid
 indices and other SQLite errors:
 
 ```rust
-fun insert_person(db: Db) -> Result<Bool, String> {
+fun insert_person(db: Db) -> Result[bool, str] {
     let statement = db.prepare("insert into users (name, age) values (?, ?)")?
     let _ = statement.try_bind_text(1, "Carol")?
     let _ = statement.try_bind_int(2, 31)?
@@ -73,13 +75,13 @@ fun insert_person(db: Db) -> Result<Bool, String> {
 
 ### `Db`
 
-- `Db.open(path) -> Result<Db, String>`: open a connection (`":memory:"` or a
+- `Db.open(path) -> Result[Db, str]`: open a connection (`":memory:"` or a
   file path; the file is created if missing).
-- `db.exec(sql) -> Result<Int, String>`: run statements that return no rows
+- `db.exec(sql) -> Result[int, str]`: run statements that return no rows
   (CREATE, INSERT, UPDATE, ...). The `Ok` value is the number of rows changed.
-- `db.prepare(sql) -> Result<Stmt, String>`: compile a statement with `?`
+- `db.prepare(sql) -> Result[Stmt, str]`: compile a statement with `?`
   placeholders.
-- `db.last_insert_id() -> Int` and `db.changes() -> Int`.
+- `db.last_insert_id() -> int` and `db.changes() -> int`.
 - `db.set_busy_timeout_ms(ms)` configures lock waiting.
 - `db.try_close()` reports live statements that prevent closing. `db.close()`
   remains as a compatibility convenience when the result is intentionally
@@ -88,13 +90,13 @@ fun insert_person(db: Db) -> Result<Bool, String> {
 ### `Stmt`
 
 - `try_bind_int`, `try_bind_float`, `try_bind_text`, and `try_bind_null`: bind
-  the 1-based parameter and return `Result<Stmt, String>`.
+  the 1-based parameter and return `Result[Stmt, str]`.
 - The original chainable `bind_int`, `bind_float`, `bind_text`, and `bind_null`
   remain available for compatibility when bind errors are intentionally
   ignored.
-- `next() -> Result<Bool, String>` advances to the next row and distinguishes
+- `next() -> Result[bool, str]` advances to the next row and distinguishes
   normal completion from constraint, locking, I/O, and execution failures.
-- `step() -> Bool` is the legacy lossy form; prefer `next()`.
+- `step() -> bool` is the legacy lossy form; prefer `next()`.
 - `int(col)`, `float(col)`, `text(col)`, `is_null(col)`: read the 0-based column
   of the current row.
 - `try_int`, `try_float`, `try_text`, and `try_is_null` additionally validate
