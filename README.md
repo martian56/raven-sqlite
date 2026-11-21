@@ -14,7 +14,7 @@ Raven's FFI already requires.
 "github.com/martian56/raven-sqlite" = "v0.2.0"
 ```
 
-Needs Raven 2.26.1 or newer.
+Needs Raven 3.0.0 or newer.
 
 ## Usage
 
