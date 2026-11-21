@@ -11,7 +11,7 @@ Raven's FFI already requires.
 
 ```toml
 [dependencies]
-"github.com/martian56/raven-sqlite" = "v0.2.0"
+"github.com/martian56/raven-sqlite" = "v0.3.0"
 ```
 
 Needs Raven 3.0.0 or newer.
